@@ -320,3 +320,75 @@ def test_the_release_store_calls_fit_the_v3_and_later_client():
     inspect.signature(client.update_prompt).bind(
         name="agent-x", version=3, new_labels=["dev", "release-0123"]
     )
+
+
+def _answered(text='{"questions": []}'):
+    from openai.types.responses import (
+        Response,
+        ResponseOutputMessage,
+        ResponseOutputText,
+    )
+
+    message = ResponseOutputMessage(
+        id="m",
+        role="assistant",
+        type="message",
+        status="completed",
+        content=[ResponseOutputText(text=text, annotations=[], type="output_text")],
+    )
+    return Response.model_construct(
+        id="resp_1", model="gpt-5.5", instructions="Write the pack.", output=[message]
+    )
+
+
+def _response_flow(response, given):
+    from agents.tracing import response_span
+
+    with trace("my-flow", trace_id=TRACE_ID):
+        with response_span(response=response) as span:
+            span.span_data.input = given
+
+
+def test_a_responses_api_generation_keeps_the_instructions_the_input_and_the_answer(
+    wire,
+):
+    # ResponseSpanData.export() sends the response id alone; the messages and the
+    # answer ride on the span data, set by the SDK on a run that keeps them.
+    _response_flow(_answered(), [{"role": "user", "content": "the case"}])
+    [generation] = wire.by_type("generation")
+    assert attribute(generation, "langfuse.observation.input") == [
+        {"role": "system", "content": "Write the pack."},
+        {"role": "user", "content": "the case"},
+    ]
+    # The answer's text as sent: a structured answer is its JSON (decoded here).
+    assert attribute(generation, "langfuse.observation.output") == {"questions": []}
+    assert generation.attributes.get("langfuse.observation.model.name") == "gpt-5.5"
+
+
+def test_a_responses_api_generation_without_its_data_keeps_only_the_id(wire):
+    # A run that keeps no sensitive data: the SDK sets neither, nothing is sent.
+    from agents.tracing import response_span
+
+    with trace("my-flow", trace_id=TRACE_ID):
+        with response_span() as span:
+            span.span_data._response_id = "resp_9"
+    [generation] = wire.by_type("generation")
+    assert attribute(generation, "langfuse.observation.input") is None
+    assert attribute(generation, "langfuse.observation.output") == {
+        "response_id": "resp_9"
+    }
+
+
+def test_a_responses_api_generation_is_masked():
+    w = Wire()
+    set_trace_processors(
+        [LangfuseOtelTracingProcessor(w.client, mask=lambda *, data: "[masked]")]
+    )
+    try:
+        _response_flow(_answered("secret answer"), "secret input")
+    finally:
+        set_trace_processors([])
+    [generation] = w.by_type("generation")
+    assert attribute(generation, "langfuse.observation.input") == "[masked]"
+    assert attribute(generation, "langfuse.observation.output") == "[masked]"
+    assert "secret" not in repr([dict(s.attributes) for s in w.spans()])

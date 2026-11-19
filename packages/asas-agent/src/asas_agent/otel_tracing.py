@@ -81,6 +81,7 @@ from .tracing import (
     PromptLink,
     flat_parameters,
     langfuse_id,
+    response_io,
 )
 
 log = logging.getLogger(__name__)
@@ -299,14 +300,17 @@ class LangfuseOtelTracingProcessor(TracingProcessor):
             for k, v in usage.items()
             if isinstance(v, (int, float)) and not isinstance(v, bool)
         } or None
+        given, answered = response_io(raw) if kind == "response" else (None, None)
         output = span_data.get("output")
+        if output is None:
+            output = answered
         if output is None and span_data.get("response_id"):
             output = {"response_id": span_data["response_id"]}
         fields: dict[str, Any] = {
             "name": span_data.get("name") or kind,
             "model": model,
             "model_parameters": flat_parameters(span_data.get("model_config")),
-            "input": self._masked(span_data.get("input")),
+            "input": self._masked(span_data.get("input") or given),
             "output": self._masked(output),
             "usage_details": usage_details,
             "metadata": {"kind": kind},

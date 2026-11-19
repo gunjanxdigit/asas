@@ -77,6 +77,56 @@ MASK_FAILED = "[mask failed]"
 GENERATION_KINDS = frozenset({"generation", "response"})
 
 
+def _plain(item: Any) -> Any:
+    """A Responses API item as plain data: a pydantic model dumped, else as given."""
+    dump = getattr(item, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump(mode="json", exclude_none=True)
+        except Exception:  # noqa: BLE001 - a trace field is best effort
+            return repr(item)
+    return item
+
+
+def response_io(raw: Any) -> tuple[Any, Any]:
+    """The input and output of a Responses API span, or ``(None, None)``.
+
+    ``ResponseSpanData.export()`` sends the response id, the usage and the type
+    alone; the model call's messages and answer ride on the span data object as
+    ``input`` and ``response``, and the SDK sets them only on a run that keeps
+    sensitive data (``RunConfig.trace_include_sensitive_data``). So without this
+    a Responses API generation reaches Langfuse with no input and the response id
+    as its output, whatever the run allowed. The input is the call's
+    instructions as a ``system`` message, then its input items; the output is the
+    response's text, or its output items when it has no text (a tool call).
+    """
+    response = getattr(raw, "response", None)
+    given = getattr(raw, "input", None)
+    if response is None and given is None:
+        return None, None
+    messages: list[Any] = []
+    instructions = getattr(response, "instructions", None)
+    if isinstance(instructions, str) and instructions:
+        messages.append({"role": "system", "content": instructions})
+    if isinstance(given, str):
+        messages.append({"role": "user", "content": given})
+    elif isinstance(given, (list, tuple)):
+        messages.extend(_plain(item) for item in given)
+    output: Any = None
+    if response is not None:
+        try:
+            text = response.output_text
+        except Exception:  # noqa: BLE001
+            text = None
+        if isinstance(text, str) and text:
+            output = text
+        else:
+            output = [
+                _plain(item) for item in (getattr(response, "output", None) or [])
+            ] or None
+    return (messages or None), output
+
+
 def langfuse_id(sdk_id: str | None) -> str | None:
     """A Langfuse id from an SDK one: ``trace_<hex>`` -> ``<hex>``; a span id
     is kept whole (``span_<hex>``), unique either way."""
@@ -250,14 +300,17 @@ class LangfuseTracingProcessor(TracingProcessor):
         usage_details = {
             k: int(v) for k, v in usage.items() if isinstance(v, (int, float))
         } or None
+        given, answered = response_io(raw) if kind == "response" else (None, None)
         output = span_data.get("output")
+        if output is None:
+            output = answered
         if output is None and span_data.get("response_id"):
             output = {"response_id": span_data["response_id"]}
         self.client.generation(
             name=span_data.get("name") or kind,
             model=model,
             model_parameters=flat_parameters(span_data.get("model_config")),
-            input=self._masked(span_data.get("input")),
+            input=self._masked(span_data.get("input") or given),
             output=self._masked(output),
             usage_details=usage_details,
             metadata={"kind": kind},

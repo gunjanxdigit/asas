@@ -5,6 +5,12 @@ Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
 
+## 0.6.1
+
+A Responses API model call reaches Langfuse with its input and output. `ResponseSpanData.export()` sends the response id, the usage and the type alone, so both processors wrote such a generation with no input and `{"response_id": ...}` as its output, even on a run that keeps sensitive data. Fix only: nothing a host configures changes.
+
+- **`response_io`** (`asas_agent.tracing`) reads the input and the response the SDK sets on the span data when `RunConfig.trace_include_sensitive_data` is on: the call's instructions as a `system` message, then its input items; the response's text, or its output items when it has none. Both processors use it for a `response` span, through the `mask` as before. A run that keeps no sensitive data still sends the response id alone.
+
 ## 0.6.0
 
 Traces a Langfuse v4 server keeps. A self-hosted Langfuse 4.73.0 in events-only
